@@ -20,12 +20,37 @@ module type OrderedType =
     val compare : t -> t -> int
   end
 
-module Make (State: OrderedType) (Letter: OrderedType) = struct
+module Make (State: OrderedType) (TrueLetter: OrderedType) = struct
+
+  (*
+   * The letter that we will use will be the "true letters" plus epsilon.
+   * This will be encoded by a `TrueLetter.t option`, `None` representing
+   * epsilon and `Some l` representing the true letter `l`.
+   *)
+  
+  module StateSet  = Set.Make (State)
 
   (* Should not appear in signature *)
-  module StateSet  = Set.Make (State)
+  module Letter = struct
+    type t = TrueLetter.t option
+    let compare l1 l2 =
+      match (l1, l2) with
+      | None     , None     ->  0
+      | None     , _        -> -1
+      | _        , None     ->  1
+      | Some tl1 , Some tl2 -> TrueLetter.compare tl1 tl2
+  end
+  (* / Should not appear in signature *)
+
   module LetterSet = Set.Make (Letter)
   
+  type state = StateSet.elt
+  (** The type of the automaton states. *)
+
+  type letter = LetterSet.elt
+  (** The type of the automaton letters. *)
+
+  (* Should not appear in signature *)
   module Transition = struct
     type t = State.t * Letter.t * State.t
     let compare (s1, l, s2) (s1', l', s2') =
@@ -37,14 +62,9 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
 	  | n -> n)
       | n -> n
   end
-  module TransitionSet = Set.Make (Transition)
   (* / Should not appear in signature *)
 
-  type state = StateSet.elt
-  (** The type of the automaton states. *)
-
-  type letter = LetterSet.elt
-  (** The type of the automaton letters. *)
+  module TransitionSet = Set.Make (Transition)
 
   type t =
       { states        : StateSet.t
@@ -67,6 +87,9 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
     && (TransitionSet.is_empty a.transitions)
   (** Test whether an automaton is empty or not. *)
 
+  let states a =
+    StateSet.fold (fun s l -> s :: l) a.states []
+
   let add_state a s =
     { a with states = StateSet.add s a.states }
   (** [add_state a s] returns an automaton containing all states of [a], plus
@@ -79,6 +102,9 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
     ; transitions   = TransitionSet.filter (fun (s1,l,s2) -> s1<>s&&s2<>s) a.transitions }
   (** [del_state a s] returns an automaton containing all states of [a], except
       [s]. If [s] was not in [a], [a] is returned unchanged. *)
+
+  let start_states a =
+    StateSet.fold (fun s l -> s :: l) a.start_states []
 
   let add_start_state a s =
     { states        = StateSet.add s a.states
@@ -96,6 +122,12 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
       but where [s] is not a start state. If [s] was not a start state in [a],
       [a] is returned unchanged. *)
 
+  let clear_start_states a =
+    { a with start_states = StateSet.empty }
+
+  let accept_states a =
+    StateSet.fold (fun s l -> s :: l) a.accept_states []
+
   let add_accept_state a s =
     { states        = StateSet.add s a.states
     ; start_states  = a.start_states
@@ -112,6 +144,12 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
       but where [s] is not an accept state. If [s] was not an accept state in
       [a], [a] is returned unchanged. *)
 
+  let clear_accept_states a =
+    { a with accept_states = StateSet.empty }
+
+  let transitions a =
+    TransitionSet.fold (fun tr l -> tr :: l) a.transitions []
+
   let add_transition a (s1, l, s2) =
     { states        = StateSet.add s1 (StateSet.add s2 a.states)
     ; start_states  = a.start_states
@@ -121,16 +159,38 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
   let del_transition a tr =
     { a with transitions = TransitionSet.remove tr a.transitions }
 
-  let step a s l =
-    TransitionSet.fold
-      (fun (s1, l', s2) st_l -> if s1 = s && l' = l then s2 :: st_l else st_l)
-      a.transitions
-      []
-      
+  let clear_transitions a =
+    { a with transitions = TransitionSet.empty }
+
   let of_lists st_l sst_l ast_l tr_l =
     List.fold_left add_transition (List.fold_left add_accept_state (List.fold_left add_start_state (List.fold_left add_state empty st_l) sst_l) ast_l) tr_l
 
+  let union a1 a2 =
+    { states        = StateSet.union a1.states a2.states
+    ; start_states  = StateSet.union a1.start_states a2.start_states
+    ; accept_states = StateSet.union a1.accept_states a2.accept_states
+    ; transitions   = TransitionSet.union a1.transitions a2.transitions }
+		   
+      
   let run a w = (* word = letter list *)
+    let step a s l =
+      TransitionSet.fold
+	(fun (s1, l', s2) st_l -> if s1 = s && l' = l then s2 :: st_l else st_l)
+	a.transitions
+	[]
+    in
+    (* be carefull, this function is not doing what is expected. in particular,
+       it is not handling the epsilon-transitions ! *)
+
+    let epsilon_closure a sl =
+      TransitionSet.fold
+	(fun (s1, l, s2) st_l -> if (List.mem s1 sl) && l = None then s2 :: st_l else st_l)
+	a.transitions
+	sl
+    in
+    (* this function computes all the states you can reach spontaneously with an
+       epsilon transition *)
+    
     let rec run_aux s = function
       | [] -> [[s]]
       | l :: w' ->
@@ -147,7 +207,7 @@ module Make (State: OrderedType) (Letter: OrderedType) = struct
 
   let accepts a w =
     if w = [] then
-      StateSet.is_empty (StateSet.inter a.start_states a.accept_states)
+      not (StateSet.is_empty (StateSet.inter a.start_states a.accept_states))
     else
       List.exists
 	(fun r -> StateSet.mem (list_last r) a.accept_states)
@@ -157,6 +217,8 @@ end
 
 
 (*-
+ * /!\ I should only use sets in this module, for efficiency (way more efficient than lists).
+ *
  * TODO list
  *
  * - Add a way to define automatons with a state stream. That would be really
@@ -169,4 +231,3 @@ end
  *
  * - Add determinization of automatons
  *)
-
